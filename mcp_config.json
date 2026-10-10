@@ -1,0 +1,126 @@
+{
+  "mcpServers": {
+    "core-codebase": {
+      "command": "python",
+      "args": [
+        "c:/Users/samet/Desktop/agentic-skills/tools/codebase_tools/server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    "core-system": {
+      "command": "python",
+      "args": [
+        "c:/Users/samet/Desktop/agentic-skills/tools/system_tools/server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    "web-search": {
+      "command": "python",
+      "args": [
+        "c:/Users/samet/Desktop/agentic-skills/tools/web_tools/search_server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    "project-memory": {
+      "command": "python",
+      "args": [
+        "c:/Users/samet/Desktop/agentic-skills/tools/memory_tools/server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    "task-planner": {
+      "command": "python",
+      "args": [
+        "c:/Users/samet/Desktop/agentic-skills/tools/planner_tools/server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    "api-client": {
+      "command": "python",
+      "args": [
+        "c:/Users/samet/Desktop/agentic-skills/tools/api_tools/server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    "vision-images": {
+      "command": "python",
+      "args": [
+        "c:/Users/samet/Desktop/agentic-skills/tools/vision_image_tools/server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    "sqlite-database": {
+      "command": "python",
+      "args": [
+        "c:/Users/samet/Desktop/agentic-skills/tools/database_tools/server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    "smart-pdf": {
+      "command": "python",
+      "args": [
+        "c:/Users/samet/Desktop/agentic-skills/tools/pdf_tools/server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    "git": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-git"
+      ]
+    },
+    "puppeteer": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-puppeteer"
+      ]
+    },
+    "diagram-visualizer": {
+      "command": "python",
+      "args": [
+        "c:/Users/samet/Desktop/agentic-skills/tools/diagram_tools/server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    "office-tools": {
+      "command": "python",
+      "args": [
+        "c:/Users/samet/Desktop/agentic-skills/tools/office_tools/server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    },
+    "all-in-one-suite": {
+      "command": "python",
+      "args": [
+        "c:/Users/samet/Desktop/agentic-skills/unified_server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
+    }
+  }
+}
