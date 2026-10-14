@@ -83,6 +83,7 @@ Yerel 7B, 8B veya 14B modellerin bellek taşmasını önlemek için LM Studio ay
 ### Profil B: Backend & API Geliştirme
 - `core-codebase` + `core-system`
 - `api-client` (FastAPI / Express endpoint testleri)
+- `web-search` (`websocket_*` araçlarıyla `ws://` ve `wss://` servis testi)
 - `sqlite-database` (Veritabanı tabloları ve SQL sorguları)
 - `task-planner` (Çok adımlı görevleri unutmamak için)
 

@@ -2,7 +2,7 @@
 
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from mcp.server.fastmcp import FastMCP
 
@@ -48,6 +48,66 @@ def research_web(
 ) -> Dict[str, Any]:
     """İlk arama sonuçlarını paralel okuyarak toplu araştırma verisi döndürür."""
     return core.research_web(query, max_pages, max_characters_per_page, concurrency, timeout_seconds)
+
+
+@mcp.tool()
+def websocket_connect(
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    subprotocols: Optional[List[str]] = None,
+    open_timeout_seconds: int = 10,
+    max_message_bytes: int = 1_048_576,
+) -> Dict[str, Any]:
+    """Kalıcı bir ws:// veya wss:// bağlantısı açar."""
+    return core.websocket_connect(url, headers, subprotocols, open_timeout_seconds, max_message_bytes)
+
+
+@mcp.tool()
+def websocket_send(connection_id: str, message: str, binary_base64: bool = False) -> Dict[str, Any]:
+    """Açık bağlantıya metin veya Base64 kodlu ikili mesaj gönderir."""
+    return core.websocket_send(connection_id, message, binary_base64)
+
+
+@mcp.tool()
+def websocket_receive(connection_id: str, timeout_seconds: int = 10) -> Dict[str, Any]:
+    """Açık bağlantıdan sıradaki mesajı alır."""
+    return core.websocket_receive(connection_id, timeout_seconds)
+
+
+@mcp.tool()
+def websocket_ping(connection_id: str, payload: str = "", timeout_seconds: int = 10) -> Dict[str, Any]:
+    """Ping gönderir ve pong yanıtını bekler."""
+    return core.websocket_ping(connection_id, payload, timeout_seconds)
+
+
+@mcp.tool()
+def websocket_close(connection_id: str) -> Dict[str, Any]:
+    """Bağlantıyı kapatıp bağlantı havuzundan çıkarır."""
+    return core.websocket_close(connection_id)
+
+
+@mcp.tool()
+def websocket_list_connections() -> Dict[str, Any]:
+    """Sunucu belleğinde tutulan WebSocket bağlantılarını listeler."""
+    return core.websocket_list_connections()
+
+
+@mcp.tool()
+def websocket_request(
+    url: str,
+    message: str,
+    headers: Optional[Dict[str, str]] = None,
+    subprotocols: Optional[List[str]] = None,
+    receive_count: int = 1,
+    timeout_seconds: int = 10,
+    binary_base64: bool = False,
+    max_message_bytes: int = 1_048_576,
+) -> Dict[str, Any]:
+    """Tek çağrıda bağlanır, mesaj gönderir, yanıtları alır ve bağlantıyı kapatır."""
+    return core.websocket_request(
+        url, message, headers, subprotocols, receive_count,
+        timeout_seconds, binary_base64, max_message_bytes,
+    )
 
 
 if __name__ == "__main__":

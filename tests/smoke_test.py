@@ -4,7 +4,10 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
+
+from websockets.sync.server import serve
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -67,6 +70,48 @@ def test_web():
     require(len(research.get("sayfalar", [])) <= 3, str(research))
 
 
+def test_websocket():
+    def echo(connection):
+        for message in connection:
+            connection.send(message)
+
+    ws_server = serve(echo, "127.0.0.1", 0)
+    port = ws_server.socket.getsockname()[1]
+    thread = threading.Thread(target=ws_server.serve_forever, daemon=True)
+    thread.start()
+    url = f"ws://127.0.0.1:{port}"
+    try:
+        opened = server.websocket_connect(url, open_timeout_seconds=5)
+        require(opened.get("basarili") is True, str(opened))
+        connection_id = opened["connection_id"]
+
+        sent = server.websocket_send(connection_id, '{"hello":"world"}')
+        require(sent.get("basarili") is True, str(sent))
+        received = server.websocket_receive(connection_id, timeout_seconds=5)
+        require(received.get("mesaj") == '{"hello":"world"}', str(received))
+
+        binary_sent = server.websocket_send(connection_id, "AAEC", binary_base64=True)
+        require(binary_sent.get("basarili") is True, str(binary_sent))
+        binary_received = server.websocket_receive(connection_id, timeout_seconds=5)
+        require(binary_received.get("base64") == "AAEC", str(binary_received))
+
+        pong = server.websocket_ping(connection_id, "mcp", timeout_seconds=5)
+        require(pong.get("pong_alindi") is True, str(pong))
+        listed = server.websocket_list_connections()
+        require(listed.get("baglanti_sayisi") == 1, str(listed))
+        closed = server.websocket_close(connection_id)
+        require(closed.get("basarili") is True, str(closed))
+
+        exchanged = server.websocket_request(url, "one-shot", timeout_seconds=5)
+        require(exchanged.get("basarili") is True, str(exchanged))
+        require(exchanged.get("yanitlar", [{}])[0].get("mesaj") == "one-shot", str(exchanged))
+        require(server.websocket_list_connections().get("baglanti_sayisi") == 0, "Bağlantı havuzu temizlenmedi")
+    finally:
+        server._close_all_websockets()
+        ws_server.shutdown()
+        thread.join(timeout=5)
+
+
 if __name__ == "__main__":
     test_powershell()
     print("[OK] PowerShell")
@@ -74,3 +119,5 @@ if __name__ == "__main__":
     print("[OK] Git")
     test_web()
     print("[OK] Web")
+    test_websocket()
+    print("[OK] WebSocket")

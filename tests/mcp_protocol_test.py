@@ -14,7 +14,7 @@ async def list_tool_names(script: Path):
     parameters = StdioServerParameters(
         command=sys.executable,
         args=[str(script)],
-        env={"PYTHONIOENCODING": "utf-8"},
+        env={"PYTHONIOENCODING": "utf-8", "PYTHONDONTWRITEBYTECODE": "1"},
     )
     async with stdio_client(parameters) as (reader, writer):
         async with ClientSession(reader, writer) as session:
@@ -27,7 +27,11 @@ async def main():
     expected = {
         ROOT / "tools" / "system_tools" / "server.py": {"run_powershell", "get_system_environment_info"},
         ROOT / "tools" / "git_tools" / "server.py": {"git_status", "git_diff", "git_log", "git_add"},
-        ROOT / "tools" / "web_tools" / "search_server.py": {"web_search", "fetch_web_page_text", "observe_web_page", "research_web"},
+        ROOT / "tools" / "web_tools" / "search_server.py": {
+            "web_search", "fetch_web_page_text", "observe_web_page", "research_web",
+            "websocket_connect", "websocket_send", "websocket_receive", "websocket_ping",
+            "websocket_close", "websocket_list_connections", "websocket_request",
+        },
     }
     for script, required in expected.items():
         names = await asyncio.wait_for(list_tool_names(script), timeout=30)

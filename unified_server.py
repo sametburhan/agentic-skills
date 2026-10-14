@@ -6,6 +6,7 @@ ve DuckDuckGo Web Arama yeteneklerinin tümünü tek bir MCP sunucusunda birleş
 LM Studio'ya tek bir Python komutu ekleyerek tüm bu yeteneklere anında erişebilirsiniz.
 """
 
+import atexit
 import os
 import re
 import json
@@ -17,9 +18,11 @@ import sqlite3
 import subprocess
 import shutil
 import tempfile
+import threading
 import urllib.request
 import urllib.error
 import urllib.parse
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, Any, List, Optional, Sequence
 
@@ -30,6 +33,8 @@ import fitz  # PyMuPDF
 from bs4 import BeautifulSoup
 from ddgs import DDGS
 from mcp.server.fastmcp import FastMCP
+from websockets.exceptions import ConnectionClosed
+from websockets.sync.client import connect as websocket_client_connect
 
 logging.getLogger("ddgs").setLevel(logging.WARNING)
 logging.getLogger("primp").setLevel(logging.WARNING)
@@ -617,6 +622,11 @@ WEB_USER_AGENT = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 )
 
+MAX_WEBSOCKET_CONNECTIONS = 32
+MAX_WEBSOCKET_MESSAGE_BYTES = 16 * 1024 * 1024
+_WEBSOCKET_CONNECTIONS: Dict[str, Dict[str, Any]] = {}
+_WEBSOCKET_REGISTRY_LOCK = threading.RLock()
+
 
 def _normalize_http_url(url: str) -> str:
     cleaned = (url or "").strip()
@@ -624,6 +634,59 @@ def _normalize_http_url(url: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("Geçerli bir http:// veya https:// URL'si girilmelidir.")
     return cleaned
+
+
+def _normalize_websocket_url(url: str) -> str:
+    cleaned = (url or "").strip()
+    parsed = urllib.parse.urlparse(cleaned)
+    if parsed.scheme not in {"ws", "wss"} or not parsed.netloc:
+        raise ValueError("Geçerli bir ws:// veya wss:// URL'si girilmelidir.")
+    return cleaned
+
+
+def _websocket_headers(headers: Optional[Dict[str, str]]) -> Dict[str, str]:
+    result: Dict[str, str] = {}
+    for raw_name, raw_value in (headers or {}).items():
+        name = str(raw_name).strip()
+        value = str(raw_value).strip()
+        if not name or any(char in name for char in "\r\n:"):
+            raise ValueError("WebSocket başlık adı geçersiz.")
+        if "\r" in value or "\n" in value:
+            raise ValueError(f"'{name}' başlığının değeri geçersiz.")
+        result[name] = value
+    return result
+
+
+def _get_websocket_connection(connection_id: str) -> Dict[str, Any]:
+    cleaned_id = (connection_id or "").strip()
+    with _WEBSOCKET_REGISTRY_LOCK:
+        entry = _WEBSOCKET_CONNECTIONS.get(cleaned_id)
+    if entry is None:
+        raise KeyError(f"WebSocket bağlantısı bulunamadı: {cleaned_id}")
+    return entry
+
+
+def _remove_websocket_connection(connection_id: str) -> bool:
+    with _WEBSOCKET_REGISTRY_LOCK:
+        entry = _WEBSOCKET_CONNECTIONS.pop(connection_id, None)
+    if entry is None:
+        return False
+    try:
+        with entry["lock"]:
+            entry["connection"].close()
+    except Exception:
+        pass
+    return True
+
+
+def _close_all_websockets() -> None:
+    with _WEBSOCKET_REGISTRY_LOCK:
+        connection_ids = list(_WEBSOCKET_CONNECTIONS)
+    for connection_id in connection_ids:
+        _remove_websocket_connection(connection_id)
+
+
+atexit.register(_close_all_websockets)
 
 
 def _download_html(url: str, timeout: int = 20, max_bytes: int = 5_000_000) -> Dict[str, Any]:
@@ -929,6 +992,223 @@ def research_web(
         "sayfalar": pages,
         "hatalar": failures,
     }
+
+
+@mcp.tool()
+def websocket_connect(
+    url: str,
+    headers: Optional[Dict[str, str]] = None,
+    subprotocols: Optional[List[str]] = None,
+    open_timeout_seconds: int = 10,
+    max_message_bytes: int = 1_048_576,
+) -> Dict[str, Any]:
+    """Bir ws:// veya wss:// adresine kalıcı bağlantı açar ve connection_id döndürür.
+
+    Özel HTTP başlıkları ve WebSocket alt protokolleri desteklenir. Bağlantı MCP
+    sunucusu belleğinde tutulur; sunucu yeniden başlatılırsa bağlantı kaybolur.
+    """
+    connection = None
+    try:
+        cleaned_url = _normalize_websocket_url(url)
+        clean_headers = _websocket_headers(headers)
+        clean_subprotocols = [str(item).strip() for item in (subprotocols or []) if str(item).strip()]
+        timeout = max(1, min(int(open_timeout_seconds), 120))
+        message_limit = max(1_024, min(int(max_message_bytes), MAX_WEBSOCKET_MESSAGE_BYTES))
+
+        with _WEBSOCKET_REGISTRY_LOCK:
+            if len(_WEBSOCKET_CONNECTIONS) >= MAX_WEBSOCKET_CONNECTIONS:
+                return {
+                    "basarili": False,
+                    "hata": f"En fazla {MAX_WEBSOCKET_CONNECTIONS} eşzamanlı WebSocket bağlantısı açılabilir.",
+                }
+
+        connection = websocket_client_connect(
+            cleaned_url,
+            additional_headers=clean_headers or None,
+            subprotocols=clean_subprotocols or None,
+            open_timeout=timeout,
+            close_timeout=timeout,
+            max_size=message_limit,
+        )
+        connection_id = uuid.uuid4().hex
+        entry = {
+            "connection": connection,
+            "lock": threading.RLock(),
+            "url": cleaned_url,
+            "created_at": time.time(),
+            "subprotocol": connection.subprotocol,
+            "max_message_bytes": message_limit,
+        }
+        with _WEBSOCKET_REGISTRY_LOCK:
+            if len(_WEBSOCKET_CONNECTIONS) >= MAX_WEBSOCKET_CONNECTIONS:
+                connection.close()
+                return {
+                    "basarili": False,
+                    "hata": f"En fazla {MAX_WEBSOCKET_CONNECTIONS} eşzamanlı WebSocket bağlantısı açılabilir.",
+                }
+            _WEBSOCKET_CONNECTIONS[connection_id] = entry
+        return {
+            "basarili": True,
+            "connection_id": connection_id,
+            "url": cleaned_url,
+            "subprotocol": connection.subprotocol,
+            "max_message_bytes": message_limit,
+        }
+    except Exception as exc:
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:
+                pass
+        return {"basarili": False, "hata": f"WebSocket bağlantısı açılamadı: {exc}"}
+
+
+@mcp.tool()
+def websocket_send(connection_id: str, message: str, binary_base64: bool = False) -> Dict[str, Any]:
+    """Açık WebSocket bağlantısına metin veya Base64 kodlu ikili mesaj gönderir."""
+    try:
+        entry = _get_websocket_connection(connection_id)
+        if binary_base64:
+            payload = base64.b64decode(message or "", validate=True)
+            message_type = "binary"
+        else:
+            payload = message or ""
+            message_type = "text"
+        payload_size = len(payload if isinstance(payload, bytes) else payload.encode("utf-8"))
+        if payload_size > entry["max_message_bytes"]:
+            return {
+                "basarili": False,
+                "hata": f"Mesaj {entry['max_message_bytes']} bayt bağlantı sınırını aşıyor.",
+            }
+        with entry["lock"]:
+            entry["connection"].send(payload)
+        return {"basarili": True, "connection_id": connection_id, "tur": message_type, "bayt": payload_size}
+    except ConnectionClosed as exc:
+        _remove_websocket_connection(connection_id)
+        return {"basarili": False, "hata": f"WebSocket bağlantısı kapalı: {exc}"}
+    except Exception as exc:
+        return {"basarili": False, "hata": f"WebSocket mesajı gönderilemedi: {exc}"}
+
+
+@mcp.tool()
+def websocket_receive(connection_id: str, timeout_seconds: int = 10) -> Dict[str, Any]:
+    """Açık WebSocket bağlantısından bir sonraki metin veya ikili mesajı alır."""
+    try:
+        entry = _get_websocket_connection(connection_id)
+        timeout = max(0.1, min(float(timeout_seconds), 300.0))
+        with entry["lock"]:
+            message = entry["connection"].recv(timeout=timeout)
+        if isinstance(message, bytes):
+            return {
+                "basarili": True,
+                "connection_id": connection_id,
+                "tur": "binary",
+                "base64": base64.b64encode(message).decode("ascii"),
+                "bayt": len(message),
+            }
+        return {
+            "basarili": True,
+            "connection_id": connection_id,
+            "tur": "text",
+            "mesaj": message,
+            "bayt": len(message.encode("utf-8")),
+        }
+    except TimeoutError:
+        return {"basarili": False, "zaman_asimi": True, "hata": "Bekleme süresinde WebSocket mesajı gelmedi."}
+    except ConnectionClosed as exc:
+        _remove_websocket_connection(connection_id)
+        return {"basarili": False, "hata": f"WebSocket bağlantısı kapandı: {exc}"}
+    except Exception as exc:
+        return {"basarili": False, "hata": f"WebSocket mesajı alınamadı: {exc}"}
+
+
+@mcp.tool()
+def websocket_ping(connection_id: str, payload: str = "", timeout_seconds: int = 10) -> Dict[str, Any]:
+    """WebSocket bağlantısına ping gönderir ve eşleşen pong yanıtını bekler."""
+    try:
+        entry = _get_websocket_connection(connection_id)
+        timeout = max(0.1, min(float(timeout_seconds), 120.0))
+        ping_payload = (payload or "").encode("utf-8")
+        if len(ping_payload) > 125:
+            return {"basarili": False, "hata": "Ping yükü WebSocket sınırı olan 125 baytı aşamaz."}
+        with entry["lock"]:
+            pong_event = entry["connection"].ping(ping_payload)
+            pong_received = pong_event.wait(timeout)
+        return {
+            "basarili": bool(pong_received),
+            "connection_id": connection_id,
+            "pong_alindi": bool(pong_received),
+            "hata": None if pong_received else "Pong yanıtı zaman aşımına uğradı.",
+        }
+    except ConnectionClosed as exc:
+        _remove_websocket_connection(connection_id)
+        return {"basarili": False, "hata": f"WebSocket bağlantısı kapandı: {exc}"}
+    except Exception as exc:
+        return {"basarili": False, "hata": f"WebSocket ping gönderilemedi: {exc}"}
+
+
+@mcp.tool()
+def websocket_close(connection_id: str) -> Dict[str, Any]:
+    """Kalıcı WebSocket bağlantısını kapatır ve bağlantı havuzundan çıkarır."""
+    removed = _remove_websocket_connection((connection_id or "").strip())
+    if not removed:
+        return {"basarili": False, "hata": f"WebSocket bağlantısı bulunamadı: {connection_id}"}
+    return {"basarili": True, "connection_id": connection_id, "kapandi": True}
+
+
+@mcp.tool()
+def websocket_list_connections() -> Dict[str, Any]:
+    """Sunucu belleğinde tutulan açık WebSocket bağlantılarını listeler."""
+    now = time.time()
+    with _WEBSOCKET_REGISTRY_LOCK:
+        connections = [
+            {
+                "connection_id": connection_id,
+                "url": entry["url"],
+                "subprotocol": entry["subprotocol"],
+                "acik_sure_saniye": round(now - entry["created_at"], 2),
+                "max_message_bytes": entry["max_message_bytes"],
+            }
+            for connection_id, entry in _WEBSOCKET_CONNECTIONS.items()
+        ]
+    return {"basarili": True, "baglanti_sayisi": len(connections), "baglantilar": connections}
+
+
+@mcp.tool()
+def websocket_request(
+    url: str,
+    message: str,
+    headers: Optional[Dict[str, str]] = None,
+    subprotocols: Optional[List[str]] = None,
+    receive_count: int = 1,
+    timeout_seconds: int = 10,
+    binary_base64: bool = False,
+    max_message_bytes: int = 1_048_576,
+) -> Dict[str, Any]:
+    """Bağlan, mesaj gönder, belirli sayıda yanıt al ve bağlantıyı kapat akışını tek çağrıda yapar."""
+    opened = websocket_connect(url, headers, subprotocols, timeout_seconds, max_message_bytes)
+    if not opened.get("basarili"):
+        return opened
+    connection_id = opened["connection_id"]
+    responses: List[Dict[str, Any]] = []
+    try:
+        sent = websocket_send(connection_id, message, binary_base64)
+        if not sent.get("basarili"):
+            return sent
+        for _ in range(max(0, min(int(receive_count), 20))):
+            received = websocket_receive(connection_id, timeout_seconds)
+            responses.append(received)
+            if not received.get("basarili"):
+                break
+        return {
+            "basarili": all(response.get("basarili") for response in responses) if responses else True,
+            "url": opened["url"],
+            "subprotocol": opened.get("subprotocol"),
+            "gonderim": sent,
+            "yanitlar": responses,
+        }
+    finally:
+        _remove_websocket_connection(connection_id)
 
 
 # ==============================================================================
