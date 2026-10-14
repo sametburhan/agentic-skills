@@ -82,18 +82,13 @@
       }
     },
     "git": {
-      "command": "npx",
+      "command": "python",
       "args": [
-        "-y",
-        "@modelcontextprotocol/server-git"
-      ]
-    },
-    "puppeteer": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-puppeteer"
-      ]
+        "c:/Users/samet/Desktop/agentic-skills/tools/git_tools/server.py"
+      ],
+      "env": {
+        "PYTHONIOENCODING": "utf-8"
+      }
     },
     "diagram-visualizer": {
       "command": "python",

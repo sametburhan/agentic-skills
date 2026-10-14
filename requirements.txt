@@ -1,7 +1,7 @@
 # Agentic Skills & Local MCP Tools Requirements
-mcp>=1.2.0,<2.0.0
+mcp>=1.19.0,<2.0.0
 pymupdf>=1.24.0
-duckduckgo-search>=7.0.0
+ddgs>=9.0.0,<10.0.0
 beautifulsoup4>=4.12.0
 urllib3>=2.0.0
 Pillow>=10.0.0

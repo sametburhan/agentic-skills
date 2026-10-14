@@ -51,10 +51,10 @@ c:\Users\samet\Desktop\agentic-skills\
     │   ├── server.py
     │   └── README.md
     │
-    ├── web_tools/                 # DuckDuckGo anlık web arama, temiz metin çıkarma ve Puppeteer tarayıcı otomasyonu
+    ├── web_tools/                 # DDGS arama, temiz metin çıkarma ve Chrome/Edge headless sayfa gözlemi
     │   ├── search_server.py
     │   ├── README.md
-    │   └── puppeteer_guide.md
+    │   └── puppeteer_guide.md     # Eski Puppeteer yapılandırmaları için geçiş notları
     │
     ├── diagram_tools/             # Mermaid şemalarını ve Markdown sayfalarını PNG görsellerine dönüştürme
     │   ├── server.py
@@ -64,7 +64,8 @@ c:\Users\samet\Desktop\agentic-skills\
     │   ├── server.py
     │   └── README.md
     │
-    └── git_tools/                 # Git MCP sunucusu ve terminal Git iş akışları
+    └── git_tools/                 # Yerel Git durum, diff, log, branch, add ve commit araçları
+        ├── server.py
         └── README.md
 ```
 
@@ -88,12 +89,12 @@ Yerel 7B, 8B veya 14B modellerin bellek taşmasını önlemek için LM Studio ay
 ### Profil C: Frontend & UI Tasarım
 - `core-codebase` + `core-system`
 - `vision-images` (Tasarım mockup'larını modele gösterme)
-- `puppeteer` (Localhost web sayfasının ekran görüntüsünü alıp inceleme)
+- `web-search` (`observe_web_page` ile statik veya JavaScript-render edilmiş sayfa inceleme)
 
 ### Profil D: Araştırma, Dokümantasyon & Ofis
 - `office-tools` (Word raporları ve PowerPoint sunumlarını JSON okuma)
 - `smart-pdf` (Uzun PDF kitap ve makale analizi)
-- `web-search` (Güncel internet araması)
+- `web-search` (`research_web` ile ilk 20 sonucu toplu araştırma ve kaynaklı içerik okuma)
 - `project-memory` (Öğrenilen bilgileri kalıcı kaydetme)
 
 ---
@@ -103,13 +104,18 @@ Yerel 7B, 8B veya 14B modellerin bellek taşmasını önlemek için LM Studio ay
 ### 1. Adım: Python Bağımlılıklarını Kurun
 Çalışma dizinindeki `install_dependencies.bat` dosyasını çift tıklayarak çalıştırın:
 ```powershell
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
 ```
+
+Betik kendi proje dizinine otomatik geçer, MCP yapılandırmasındaki `python` komutuyla aynı yorumlayıcıyı tercih eder ve kurulum hatasında başarı mesajı göstermez. Otomatik kullanım için `install_dependencies.bat --no-pause` çalıştırılabilir.
 
 ### 2. Adım: LM Studio'ya MCP Sunucularını Tanıtın
 1. LM Studio uygulamasını açın ve **Settings (Ayarlar) / Developer -> MCP Servers** bölümüne gidin.
 2. [mcp_config.json](file:///c:/Users/samet/Desktop/agentic-skills/mcp_config.json) dosyasını içe aktarın veya sunucuları ekleyin.
 3. Çalışacağınız projeye göre yukarıdaki profillerden birini seçerek ilgili sunucuların yanındaki anahtarları açık tutun.
+
+> `all-in-one-suite` kullanıyorsanız aynı modüler sunucuları ayrıca açmayın; araç isimleri yinelenir.
+> Yapılandırma değişikliğinden sonra MCP istemcisini yeniden başlatın.
 
 ---
 
@@ -125,6 +131,6 @@ pip install -r requirements.txt
 - [SQLite Veritabanı Aracı Kılavuzu](file:///c:/Users/samet/Desktop/agentic-skills/tools/database_tools/README.md)
 - [Akıllı PDF & Vision Aracı Kılavuzu](file:///c:/Users/samet/Desktop/agentic-skills/tools/pdf_tools/README.md)
 - [Web Arama & İçerik Çekme Kılavuzu](file:///c:/Users/samet/Desktop/agentic-skills/tools/web_tools/README.md)
-- [Puppeteer & Ekran Görüntüsü Kılavuzu](file:///c:/Users/samet/Desktop/agentic-skills/tools/web_tools/puppeteer_guide.md)
+- [Eski Puppeteer Yapılandırmaları İçin Geçiş Notları](file:///c:/Users/samet/Desktop/agentic-skills/tools/web_tools/puppeteer_guide.md)
 - [Mermaid & Markdown to PNG Kılavuzu](file:///c:/Users/samet/Desktop/agentic-skills/tools/diagram_tools/README.md)
 - [Git MCP Aracı Kılavuzu](file:///c:/Users/samet/Desktop/agentic-skills/tools/git_tools/README.md)

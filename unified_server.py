@@ -9,29 +9,100 @@ LM Studio'ya tek bir Python komutu ekleyerek tüm bu yeteneklere anında erişeb
 import os
 import re
 import json
+import logging
 import time
 import base64
 import socket
 import sqlite3
 import subprocess
+import shutil
+import tempfile
 import urllib.request
 import urllib.error
 import urllib.parse
-from typing import Dict, Any, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, Any, List, Optional, Sequence
 
 import docx
 import pptx
 from PIL import Image
 import fitz  # PyMuPDF
 from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from mcp.server.fastmcp import FastMCP
+
+logging.getLogger("ddgs").setLevel(logging.WARNING)
+logging.getLogger("primp").setLevel(logging.WARNING)
 
 # Ana MCP Sunucusu
 mcp = FastMCP("Local-Agentic-Dev-Suite")
 
 PDF_CACHE_DIR = os.path.join(os.getcwd(), ".pdf_cache")
 os.makedirs(PDF_CACHE_DIR, exist_ok=True)
+
+
+def _creation_flags() -> int:
+    """Prevent child console windows without breaking non-Windows imports/tests."""
+    return getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
+
+def _run_process(
+    args: Sequence[str],
+    cwd: Optional[str] = None,
+    timeout_seconds: int = 60,
+    env: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """Run a non-interactive child process with deterministic UTF-8 output."""
+    if not args:
+        raise ValueError("Çalıştırılacak komut boş olamaz.")
+
+    working_directory = os.path.abspath(cwd or os.getcwd())
+    if not os.path.isdir(working_directory):
+        raise FileNotFoundError(f"Çalışma dizini bulunamadı: {working_directory}")
+
+    completed = subprocess.run(
+        list(args),
+        cwd=working_directory,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=max(1, min(int(timeout_seconds), 900)),
+        env=env,
+        shell=False,
+        creationflags=_creation_flags(),
+    )
+    return {
+        "returncode": completed.returncode,
+        "stdout": completed.stdout.strip(),
+        "stderr": completed.stderr.strip(),
+    }
+
+
+def _powershell_executable() -> Optional[str]:
+    """Prefer an absolute Windows PowerShell path, then PowerShell 7/PATH fallbacks."""
+    candidates: List[Optional[str]] = []
+    system_root = os.environ.get("SystemRoot", r"C:\Windows")
+    candidates.append(os.path.join(system_root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"))
+    candidates.extend([shutil.which("pwsh.exe"), shutil.which("pwsh"), shutil.which("powershell.exe"), shutil.which("powershell")])
+    for candidate in candidates:
+        if candidate and (os.path.isfile(candidate) or shutil.which(candidate)):
+            return candidate
+    return None
+
+
+def _format_process_result(result: Dict[str, Any], stdout_label: str = "Çıktı") -> str:
+    chunks: List[str] = []
+    if result.get("stdout"):
+        chunks.append(f"{stdout_label} (stdout):\n{result['stdout']}")
+    if result.get("stderr"):
+        chunks.append(f"Hata / Bilgi (stderr):\n{result['stderr']}")
+    if not chunks:
+        chunks.append("Komut başarıyla tamamlandı (çıktı üretmedi).")
+    chunks.append(f"[Çıkış Kodu: {result.get('returncode', -1)}]")
+    return "\n\n".join(chunks)
 
 
 # ==============================================================================
@@ -49,34 +120,25 @@ def run_powershell(command: str, cwd: Optional[str] = None, timeout_seconds: int
         cwd: Komutun çalıştırılacağı çalışma dizini (boş bırakılırsa geçerli dizin kullanılır).
         timeout_seconds: Komutun zaman aşımı süresi (varsayılan: 60 saniye).
     """
-    working_directory = cwd if cwd and os.path.exists(cwd) else os.getcwd()
-    wrapped_command = f"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; {command}"
-
     try:
-        process = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", wrapped_command],
-            cwd=working_directory,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds
+        if not command or not command.strip():
+            return "HATA: PowerShell komutu boş olamaz."
+        executable = _powershell_executable()
+        if not executable:
+            return "HATA: PowerShell bulunamadı (powershell.exe veya pwsh PATH üzerinde değil)."
+        wrapped_command = (
+            "$ErrorActionPreference='Continue'; "
+            "[Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false); "
+            "[Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false); "
+            "$OutputEncoding=[System.Text.UTF8Encoding]::new($false); "
+            + command
         )
-
-        stdout = process.stdout.strip()
-        stderr = process.stderr.strip()
-
-        response = []
-        if stdout:
-            response.append(f"Çıktı (stdout):\n{stdout}")
-        if stderr:
-            response.append(f"Hata / Bilgi (stderr):\n{stderr}")
-        if not stdout and not stderr:
-            response.append("Komut başarıyla tamamlandı (çıktı üretmedi).")
-
-        response.append(f"\n[Çıkış Kodu: {process.returncode}]")
-        return "\n\n".join(response)
-
+        result = _run_process(
+            [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", wrapped_command],
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+        )
+        return _format_process_result(result)
     except subprocess.TimeoutExpired:
         return f"HATA: Komut {timeout_seconds} saniye içinde tamamlanamadı ve zaman aşımına uğradı."
     except Exception as e:
@@ -206,28 +268,27 @@ def get_system_environment_info() -> str:
     Sistemde yüklü olan Python, Pip, Node, NPM ve Git versiyonlarını özetler.
     """
     tools = [
-        ("Python", "python --version"),
-        ("Pip", "pip --version"),
-        ("Node.js", "node --version"),
-        ("NPM", "npm --version"),
-        ("Git", "git --version")
+        ("Python", ["python", "--version"]),
+        ("Pip", ["python", "-m", "pip", "--version"]),
+        ("Node.js", ["node", "--version"]),
+        ("NPM", ["npm.cmd" if os.name == "nt" else "npm", "--version"]),
+        ("Git", ["git", "--version"]),
     ]
     report = ["=== Sistem Geliştirici Araçları Durumu ==="]
-    for name, cmd in tools:
+    for name, command_args in tools:
         try:
-            res = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", cmd],
-                capture_output=True,
-                text=True,
-                timeout=5
-            )
-            val = res.stdout.strip() if res.stdout else res.stderr.strip()
-            if res.returncode == 0:
-                report.append(f"✓ {name}: {val}")
+            executable = shutil.which(command_args[0])
+            if not executable:
+                report.append(f"[X] {name}: PATH üzerinde bulunamadı")
+                continue
+            res = _run_process([executable, *command_args[1:]], timeout_seconds=8)
+            val = res["stdout"] or res["stderr"]
+            if res["returncode"] == 0:
+                report.append(f"[OK] {name}: {val}")
             else:
-                report.append(f"✗ {name}: Hata ({val})")
-        except Exception:
-            report.append(f"✗ {name}: Bulunamadı")
+                report.append(f"[X] {name}: Hata ({val})")
+        except Exception as exc:
+            report.append(f"[X] {name}: {exc}")
     return "\n".join(report)
 
 
@@ -551,24 +612,127 @@ def convert_markdown_to_pdf(
 # 3. BÖLÜM: SIFIR API-KEY İNTERNET ARAMASI & SAYFA İÇERİĞİ
 # ==============================================================================
 
+WEB_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+)
+
+
+def _normalize_http_url(url: str) -> str:
+    cleaned = (url or "").strip()
+    parsed = urllib.parse.urlparse(cleaned)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("Geçerli bir http:// veya https:// URL'si girilmelidir.")
+    return cleaned
+
+
+def _download_html(url: str, timeout: int = 20, max_bytes: int = 5_000_000) -> Dict[str, Any]:
+    cleaned = _normalize_http_url(url)
+    request = urllib.request.Request(
+        cleaned,
+        headers={
+            "User-Agent": WEB_USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/json;q=0.8,*/*;q=0.5",
+            "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+        },
+    )
+    with urllib.request.urlopen(request, timeout=max(1, min(timeout, 60))) as response:
+        content_type = response.headers.get("Content-Type", "")
+        raw = response.read(max_bytes + 1)
+        truncated = len(raw) > max_bytes
+        raw = raw[:max_bytes]
+        charset = response.headers.get_content_charset() or "utf-8"
+        return {
+            "url": response.geturl(),
+            "status": getattr(response, "status", 200),
+            "content_type": content_type,
+            "html": raw.decode(charset, errors="replace"),
+            "truncated": truncated,
+        }
+
+
+def _extract_page_content(html: str, base_url: str, max_characters: int) -> Dict[str, Any]:
+    soup = BeautifulSoup(html, "html.parser")
+    title = soup.title.get_text(" ", strip=True) if soup.title else ""
+    for tag in soup(["script", "style", "noscript", "svg", "template"]):
+        tag.decompose()
+
+    main = soup.find("main") or soup.find("article") or soup.body or soup
+    lines = [line.strip() for line in main.get_text("\n").splitlines() if line.strip()]
+    text = "\n".join(lines)
+    limit = max(200, min(int(max_characters), 100_000))
+    was_truncated = len(text) > limit
+    if was_truncated:
+        text = text[:limit] + f"\n\n... [İçerik {limit} karakter ile sınırlandırıldı] ..."
+
+    links: List[Dict[str, str]] = []
+    seen = set()
+    for anchor in soup.find_all("a", href=True):
+        href = urllib.parse.urljoin(base_url, anchor.get("href", "").strip())
+        label = " ".join(anchor.get_text(" ", strip=True).split())
+        if href.startswith(("http://", "https://")) and href not in seen:
+            seen.add(href)
+            links.append({"metin": label[:200], "url": href})
+            if len(links) >= 50:
+                break
+    return {"baslik": title, "metin": text, "baglantilar": links, "kirpildi": was_truncated}
+
+
+def _duckduckgo_html_search(query: str, max_results: int) -> List[Dict[str, str]]:
+    search_url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
+    downloaded = _download_html(search_url, timeout=20)
+    soup = BeautifulSoup(downloaded["html"], "html.parser")
+    results: List[Dict[str, str]] = []
+    for result in soup.select(".result"):
+        anchor = result.select_one(".result__a")
+        if not anchor:
+            continue
+        href = anchor.get("href", "")
+        parsed = urllib.parse.urlparse(href)
+        if "uddg" in urllib.parse.parse_qs(parsed.query):
+            href = urllib.parse.unquote(urllib.parse.parse_qs(parsed.query)["uddg"][0])
+        snippet_node = result.select_one(".result__snippet")
+        results.append({
+            "baslik": anchor.get_text(" ", strip=True),
+            "url": href,
+            "ozet": snippet_node.get_text(" ", strip=True) if snippet_node else "",
+        })
+        if len(results) >= max_results:
+            break
+    return results
+
 @mcp.tool()
 def web_search(query: str, max_results: int = 5) -> List[Dict[str, str]]:
     """
     DuckDuckGo üzerinden internette ücretsiz ve API key gerektirmeyen anlık arama yapar.
     """
+    cleaned_query = (query or "").strip()
+    if not cleaned_query:
+        return [{"hata": "Arama sorgusu boş olamaz."}]
+    result_limit = max(1, min(int(max_results), 20))
+    errors: List[str] = []
     try:
-        results = []
-        with DDGS() as ddgs:
-            raw_results = list(ddgs.text(query, max_results=max_results))
+        results: List[Dict[str, str]] = []
+        with DDGS(timeout=15) as ddgs:
+            raw_results = list(ddgs.text(cleaned_query, max_results=result_limit))
             for r in raw_results:
                 results.append({
                     "baslik": r.get("title", "Başlıksız"),
                     "url": r.get("href", ""),
                     "ozet": r.get("body", "")
                 })
-        return results if results else [{"mesaj": f"'{query}' için sonuç bulunamadı."}]
+        if results:
+            return results
     except Exception as e:
-        return [{"hata": f"Web araması sırasında sorun: {str(e)}"}]
+        errors.append(f"DDGS: {e}")
+
+    try:
+        fallback_results = _duckduckgo_html_search(cleaned_query, result_limit)
+        if fallback_results:
+            return fallback_results
+    except Exception as e:
+        errors.append(f"DuckDuckGo HTML: {e}")
+    return [{"hata": "Web araması başarısız: " + " | ".join(errors)}]
 
 
 @mcp.tool()
@@ -576,31 +740,195 @@ def fetch_web_page_text(url: str, max_characters: int = 4000) -> str:
     """
     Belirtilen web sayfasının okunabilir temiz metnini getirir.
     """
-    if not url.startswith("http://") and not url.startswith("https://"):
-        return "HATA: Geçerli URL girilmelidir."
-
     try:
-        req = urllib.request.Request(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
-        )
-        with urllib.request.urlopen(req, timeout=15) as response:
-            html = response.read().decode("utf-8", errors="replace")
-
-        soup = BeautifulSoup(html, "html.parser")
-        for tag in soup(["script", "style", "noscript", "svg", "header", "footer", "nav"]):
-            tag.decompose()
-
-        text = soup.get_text(separator="\n")
-        lines = [line.strip() for line in text.splitlines() if line.strip()]
-        clean_text = "\n".join(lines)
-
-        if len(clean_text) > max_characters:
-            clean_text = clean_text[:max_characters] + f"\n\n... [İçerik {max_characters} karakter ile sınırlandırıldı] ..."
-
-        return clean_text if clean_text else "Sayfada metin bulunamadı."
+        downloaded = _download_html(url)
+        page = _extract_page_content(downloaded["html"], downloaded["url"], max_characters)
+        clean_text = page["metin"]
+        if page["baslik"] and page["baslik"] not in clean_text[:500]:
+            clean_text = f"{page['baslik']}\n\n{clean_text}".strip()
+        return clean_text if clean_text else "Sayfada okunabilir metin bulunamadı."
     except Exception as e:
         return f"HATA: Sayfa çekilemedi: {str(e)}"
+
+
+def _find_chromium() -> Optional[str]:
+    candidates = [
+        shutil.which("chrome.exe"), shutil.which("chrome"),
+        shutil.which("msedge.exe"), shutil.which("msedge"),
+        os.path.expandvars(r"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"),
+        os.path.expandvars(r"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
+        os.path.expandvars(r"%ProgramFiles%\Microsoft\Edge\Application\msedge.exe"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+@mcp.tool()
+def observe_web_page(
+    url: str,
+    max_characters: int = 12000,
+    render_javascript: bool = True,
+    timeout_seconds: int = 30,
+) -> Dict[str, Any]:
+    """Bir web sayfasının başlığını, okunabilir metnini ve ilk bağlantılarını gözlemler.
+
+    JavaScript gereken sayfalarda yüklü Chrome/Edge'i headless modda kullanır; tarayıcı
+    bulunamazsa otomatik olarak güvenilir statik HTTP indirmesine geri döner.
+    """
+    try:
+        cleaned_url = _normalize_http_url(url)
+        html = ""
+        final_url = cleaned_url
+        mode = "static-http"
+        render_error = None
+
+        if render_javascript:
+            browser = _find_chromium()
+            if browser:
+                try:
+                    result = _run_process(
+                        [
+                            browser, "--headless=new", "--disable-gpu", "--no-first-run",
+                            "--disable-extensions", "--disable-background-networking",
+                            f"--virtual-time-budget={max(1000, min(timeout_seconds * 1000, 30000))}",
+                            "--dump-dom", cleaned_url,
+                        ],
+                        timeout_seconds=timeout_seconds,
+                    )
+                    if result["returncode"] == 0 and "<" in result["stdout"]:
+                        html = result["stdout"]
+                        mode = "headless-browser"
+                    else:
+                        render_error = result["stderr"] or "Tarayıcı DOM üretmedi."
+                except Exception as exc:
+                    render_error = str(exc)
+            else:
+                render_error = "Chrome/Edge bulunamadı."
+
+        if not html:
+            downloaded = _download_html(cleaned_url, timeout=timeout_seconds)
+            html = downloaded["html"]
+            final_url = downloaded["url"]
+
+        page = _extract_page_content(html, final_url, max_characters)
+        return {
+            "url": final_url,
+            "mod": mode,
+            "baslik": page["baslik"],
+            "metin": page["metin"],
+            "baglantilar": page["baglantilar"],
+            "kirpildi": page["kirpildi"],
+            "render_uyarisi": render_error,
+        }
+    except Exception as exc:
+        return {"hata": f"Web sayfası gözlemlenemedi: {exc}"}
+
+
+@mcp.tool()
+def research_web(
+    query: str,
+    max_pages: int = 20,
+    max_characters_per_page: int = 4000,
+    concurrency: int = 5,
+    timeout_seconds: int = 15,
+) -> Dict[str, Any]:
+    """Bir sorgunun ilk sonuçlarını paralel okuyarak toplu araştırma verisi üretir.
+
+    Önce web araması yapar, benzersiz sonuç URL'lerini sıralar ve en fazla 20 sayfayı
+    sınırlı paralellikle indirir. Her sayfa için arama özeti, başlık, nihai URL ve
+    temiz metin döndürür. JavaScript tarayıcısı kullanmaz; hız ve kaynak verimliliği
+    için statik HTTP tercih edilir.
+    """
+    cleaned_query = (query or "").strip()
+    if not cleaned_query:
+        return {"basarili": False, "hata": "Araştırma sorgusu boş olamaz."}
+
+    page_limit = max(1, min(int(max_pages), 20))
+    text_limit = max(500, min(int(max_characters_per_page), 10_000))
+    worker_limit = max(1, min(int(concurrency), 8, page_limit))
+    request_timeout = max(5, min(int(timeout_seconds), 30))
+    started_at = time.time()
+
+    search_results = web_search(cleaned_query, page_limit)
+    if not search_results or search_results[0].get("hata"):
+        return {
+            "basarili": False,
+            "sorgu": cleaned_query,
+            "hata": search_results[0].get("hata", "Arama sonucu bulunamadı."),
+            "sayfalar": [],
+        }
+
+    unique_results: List[Dict[str, str]] = []
+    seen_urls = set()
+    for result in search_results:
+        url = (result.get("url") or "").strip()
+        if not url or url in seen_urls:
+            continue
+        try:
+            _normalize_http_url(url)
+        except ValueError:
+            continue
+        seen_urls.add(url)
+        unique_results.append(result)
+        if len(unique_results) >= page_limit:
+            break
+
+    def fetch_result(rank: int, search_result: Dict[str, str]) -> Dict[str, Any]:
+        url = search_result["url"]
+        downloaded = _download_html(url, timeout=request_timeout, max_bytes=3_000_000)
+        content_type = (downloaded.get("content_type") or "").lower()
+        if content_type and not any(token in content_type for token in ("html", "text", "json", "xml")):
+            raise ValueError(f"Desteklenmeyen içerik türü: {content_type}")
+        page = _extract_page_content(downloaded["html"], downloaded["url"], text_limit)
+        return {
+            "sira": rank,
+            "arama_basligi": search_result.get("baslik", ""),
+            "arama_ozeti": search_result.get("ozet", ""),
+            "url": url,
+            "nihai_url": downloaded["url"],
+            "sayfa_basligi": page["baslik"],
+            "metin": page["metin"],
+            "kirpildi": page["kirpildi"] or downloaded.get("truncated", False),
+            "icerik_turu": downloaded.get("content_type", ""),
+        }
+
+    pages_by_rank: Dict[int, Dict[str, Any]] = {}
+    failures: List[Dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=worker_limit, thread_name_prefix="web-research") as executor:
+        futures = {
+            executor.submit(fetch_result, rank, result): (rank, result)
+            for rank, result in enumerate(unique_results, start=1)
+        }
+        for future in as_completed(futures):
+            rank, result = futures[future]
+            try:
+                pages_by_rank[rank] = future.result()
+            except Exception as exc:
+                failures.append({
+                    "sira": rank,
+                    "baslik": result.get("baslik", ""),
+                    "url": result.get("url", ""),
+                    "hata": str(exc),
+                })
+
+    pages = [pages_by_rank[index] for index in sorted(pages_by_rank)]
+    failures.sort(key=lambda item: item["sira"])
+    return {
+        "basarili": bool(pages),
+        "sorgu": cleaned_query,
+        "istenen_sayfa": page_limit,
+        "bulunan_benzersiz_sonuc": len(unique_results),
+        "okunan_sayfa": len(pages),
+        "basarisiz_sayfa": len(failures),
+        "eszamanlilik": worker_limit,
+        "sure_ms": round((time.time() - started_at) * 1000, 2),
+        "sayfalar": pages,
+        "hatalar": failures,
+    }
 
 
 # ==============================================================================
@@ -1567,6 +1895,167 @@ def search_pptx(file_path: str, query: str) -> List[Dict[str, Any]]:
         return matches if matches else [{"mesaj": f"'{query}' ifadesi sunumda bulunamadı."}]
     except Exception as e:
         return [{"hata": f"PPTX araması sırasında hata: {str(e)}"}]
+
+
+# ==============================================================================
+# 11. BÖLÜM: YEREL GIT ARAÇLARI
+# ==============================================================================
+
+def _git_executable() -> str:
+    executable = shutil.which("git.exe") or shutil.which("git")
+    if not executable:
+        raise FileNotFoundError("Git PATH üzerinde bulunamadı.")
+    return executable
+
+
+def _git_repository(repository_path: str) -> str:
+    path = os.path.abspath(os.path.expanduser((repository_path or "").strip()))
+    if not os.path.isdir(path):
+        raise FileNotFoundError(f"Depo dizini bulunamadı: {path}")
+    probe = _run_process([_git_executable(), "-C", path, "rev-parse", "--show-toplevel"], timeout_seconds=15)
+    if probe["returncode"] != 0:
+        raise ValueError(probe["stderr"] or f"Git deposu değil: {path}")
+    return probe["stdout"].strip()
+
+
+def _run_git(repository_path: str, git_args: Sequence[str], timeout_seconds: int = 60) -> Dict[str, Any]:
+    root = _git_repository(repository_path)
+    result = _run_process(
+        [_git_executable(), "-C", root, "-c", "color.ui=false", *git_args],
+        timeout_seconds=timeout_seconds,
+    )
+    return {"depo": root, **result}
+
+
+def _git_response(result: Dict[str, Any], max_characters: int = 50000) -> Dict[str, Any]:
+    stdout = result.get("stdout", "")
+    stderr = result.get("stderr", "")
+    limit = max(1000, min(int(max_characters), 200000))
+    truncated = len(stdout) > limit
+    if truncated:
+        stdout = stdout[:limit] + f"\n... [Çıktı {limit} karakterde kesildi]"
+    return {
+        "basarili": result.get("returncode") == 0,
+        "cikis_kodu": result.get("returncode"),
+        "depo": result.get("depo"),
+        "cikti": stdout,
+        "hata": stderr or None,
+        "kirpildi": truncated,
+    }
+
+
+@mcp.tool()
+def git_status(repository_path: str) -> Dict[str, Any]:
+    """Bir Git deposunun dalını ve kısa çalışma ağacı durumunu döndürür."""
+    try:
+        branch = _run_git(repository_path, ["branch", "--show-current"])
+        status = _run_git(repository_path, ["status", "--short", "--branch"])
+        response = _git_response(status)
+        response["dal"] = branch["stdout"] or None
+        response["temiz"] = status["returncode"] == 0 and not any(
+            line and not line.startswith("##") for line in status["stdout"].splitlines()
+        )
+        return response
+    except Exception as exc:
+        return {"basarili": False, "hata": str(exc)}
+
+
+@mcp.tool()
+def git_diff(repository_path: str, staged: bool = False, max_characters: int = 50000) -> Dict[str, Any]:
+    """Stage edilmiş veya edilmemiş Git değişikliklerinin diff çıktısını döndürür."""
+    try:
+        args = ["diff"]
+        if staged:
+            args.append("--cached")
+        args.extend(["--no-ext-diff", "--"])
+        return _git_response(_run_git(repository_path, args), max_characters)
+    except Exception as exc:
+        return {"basarili": False, "hata": str(exc)}
+
+
+@mcp.tool()
+def git_log(repository_path: str, max_count: int = 10) -> Dict[str, Any]:
+    """Son Git commitlerini makine tarafından kolay okunabilir bir biçimde listeler."""
+    try:
+        count = max(1, min(int(max_count), 100))
+        result = _run_git(
+            repository_path,
+            ["log", f"--max-count={count}", "--date=iso-strict", "--pretty=format:%H%x09%an%x09%ad%x09%s"],
+        )
+        commits = []
+        for line in result["stdout"].splitlines():
+            fields = line.split("\t", 3)
+            if len(fields) == 4:
+                commits.append({"hash": fields[0], "yazar": fields[1], "tarih": fields[2], "mesaj": fields[3]})
+        return {"basarili": result["returncode"] == 0, "depo": result["depo"], "commitler": commits, "hata": result["stderr"] or None}
+    except Exception as exc:
+        return {"basarili": False, "hata": str(exc)}
+
+
+@mcp.tool()
+def git_branches(repository_path: str) -> Dict[str, Any]:
+    """Yerel ve uzak Git dallarını listeler."""
+    try:
+        result = _run_git(repository_path, ["branch", "--all", "--no-color", "--format=%(refname:short)"])
+        return {
+            "basarili": result["returncode"] == 0,
+            "depo": result["depo"],
+            "dallar": [line.strip() for line in result["stdout"].splitlines() if line.strip()],
+            "hata": result["stderr"] or None,
+        }
+    except Exception as exc:
+        return {"basarili": False, "hata": str(exc)}
+
+
+@mcp.tool()
+def git_add(repository_path: str, paths: Optional[List[str]] = None) -> Dict[str, Any]:
+    """Belirtilen yolları, yol verilmezse tüm değişiklikleri Git staging alanına ekler."""
+    try:
+        clean_paths = [str(path) for path in (paths or []) if str(path).strip()]
+        args = ["add", "--", *(clean_paths or ["."])]
+        return _git_response(_run_git(repository_path, args))
+    except Exception as exc:
+        return {"basarili": False, "hata": str(exc)}
+
+
+@mcp.tool()
+def git_commit(repository_path: str, message: str) -> Dict[str, Any]:
+    """Stage edilmiş değişiklikleri verilen mesajla commit eder."""
+    try:
+        cleaned = (message or "").strip()
+        if not cleaned:
+            return {"basarili": False, "hata": "Commit mesajı boş olamaz."}
+        return _git_response(_run_git(repository_path, ["commit", "-m", cleaned], timeout_seconds=120))
+    except Exception as exc:
+        return {"basarili": False, "hata": str(exc)}
+
+
+@mcp.tool()
+def git_create_branch(repository_path: str, branch_name: str, checkout: bool = True) -> Dict[str, Any]:
+    """Yeni bir Git dalı oluşturur ve varsayılan olarak o dala geçer."""
+    try:
+        cleaned = (branch_name or "").strip()
+        if not cleaned or cleaned.startswith("-"):
+            return {"basarili": False, "hata": "Geçersiz dal adı."}
+        check = _run_git(repository_path, ["check-ref-format", "--branch", cleaned])
+        if check["returncode"] != 0:
+            return _git_response(check)
+        args = ["switch", "-c", cleaned] if checkout else ["branch", cleaned]
+        return _git_response(_run_git(repository_path, args))
+    except Exception as exc:
+        return {"basarili": False, "hata": str(exc)}
+
+
+@mcp.tool()
+def git_checkout(repository_path: str, ref: str) -> Dict[str, Any]:
+    """Var olan bir Git dalına veya ref'e geçer; yeni dal oluşturmaz."""
+    try:
+        cleaned = (ref or "").strip()
+        if not cleaned or cleaned.startswith("-"):
+            return {"basarili": False, "hata": "Geçersiz Git ref değeri."}
+        return _git_response(_run_git(repository_path, ["switch", cleaned]))
+    except Exception as exc:
+        return {"basarili": False, "hata": str(exc)}
 
 
 if __name__ == "__main__":

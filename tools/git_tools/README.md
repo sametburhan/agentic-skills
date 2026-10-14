@@ -1,55 +1,32 @@
-# Kapsamlı Git MCP Aracı Kullanım Kılavuzu
+# Yerel Git MCP Araçları
 
-Git entegrasyonu, yerel modelinizin kod projelerinizdeki değişiklikleri takip etmesini, commit mesajları üretmesini, branch oluşturmasını ve diff incelemesi yapmasını sağlar.
+Bu modül artık harici veya yayından kaldırılmış bir npm paketine ihtiyaç duymaz. Windows'taki mevcut `git.exe` doğrudan ve etkileşimsiz alt süreçlerle çalıştırılır.
 
-Bu amaçla resmi ve açık kaynaklı **Git MCP Sunucusu** (`@modelcontextprotocol/server-git`) kullanılır.
+## Kurulum
 
----
+`git --version` komutu çalışmalı ve Git PATH üzerinde bulunmalıdır. MCP sunucusu:
 
-## 1. Kurulum ve Çalıştırma
-
-Git MCP sunucusu doğrudan `npx` aracılığıyla çalıştırılır. Çalıştırılırken hedef Git deposunun yolu (repository path) argüman olarak verilir:
-
-```bash
-npx -y @modelcontextprotocol/server-git C:/Users/samet/Desktop/projeniz
+```json
+{
+  "git": {
+    "command": "python",
+    "args": ["c:/Users/samet/Desktop/agentic-skills/tools/git_tools/server.py"],
+    "env": {"PYTHONIOENCODING": "utf-8"}
+  }
+}
 ```
 
-*(Birden fazla proje için veya dinamik dizin geçişleri için `run_powershell` aracımızla birlikte hibrit olarak da kullanılabilir).*
+## Araçlar
 
----
-
-## 2. Sunulan Git Araçları (Tools)
-
-| Fonksiyon Adı | Açıklama |
+| Araç | Açıklama |
 |---|---|
-| `git_status` | Değiştirilen, silinen ve henüz izlenmeyen (untracked) dosyaları listeler. |
-| `git_diff_unstaged` | Stage edilmemiş (çalışma alanındaki) satır bazlı kod değişikliklerini (diff) gösterir. |
-| `git_diff_staged` | `git add` ile stage edilmiş, commit edilmeye hazır değişiklikleri gösterir. |
-| `git_add` | Belirtilen dosyaları veya tüm değişiklikleri staging alanına ekler. |
-| `git_commit` | Açıklayıcı bir mesaj ile yeni bir commit oluşturur. |
-| `git_log` | Son commit geçmişini, yazar ve mesaj detaylarıyla listeler. |
-| `git_create_branch` | Yeni bir Git dalı (branch) oluşturur. |
-| `git_checkout` | Farklı bir dala veya commit'e geçiş yapar. |
+| `git_status` | Dalı ve kısa çalışma ağacı durumunu gösterir. |
+| `git_diff` | Stage edilmiş veya edilmemiş diff'i döndürür. |
+| `git_log` | Son commitleri yapılandırılmış olarak listeler. |
+| `git_branches` | Yerel ve uzak dalları listeler. |
+| `git_add` | Seçilen dosyaları veya tüm değişiklikleri stage eder. |
+| `git_commit` | Stage edilmiş değişiklikleri commit eder. |
+| `git_create_branch` | Geçerli isim kontrolüyle yeni dal oluşturur. |
+| `git_checkout` | Var olan bir dala güvenli biçimde geçer. |
 
----
-
-## 3. Hibrit Model: Git MCP + PowerShell Terminali
-
-Bazı durumlarda Git MCP'nin sağladığı standart fonksiyonların ötesine geçmeniz gerekebilir:
-- `git push origin main` (Uzak sunucuya gönderme / SSH anahtarları)
-- `git pull --rebase`
-- `git stash pop`
-- `git merge feature-branch`
-
-Bu tür özel veya etkileşimli operasyonlar için modeliniz `system_tools` içindeki `run_powershell` aracını kullanarak doğrudan terminal Git komutunu da tetikleyebilir:
-```text
-run_powershell(command="git push origin main", cwd="C:/Users/samet/Desktop/projem")
-```
-
----
-
-## 4. Model İçin Örnek Promptlar
-
-- *"Mevcut depodaki değişiklikleri kontrol et (`git_status`), mantıklı gruplara bölerek conventional commit formatında commit'le."*
-- *"Son 5 commit'i incele ve sürüm notu (changelog) taslağı oluştur."*
-- *"`refactor/login-page` adında yeni bir branch aç ve oraya geç."*
+Her çağrı `repository_path` alır; böylece aynı MCP sunucusu farklı depolar üzerinde çalışabilir. Push, pull, rebase ve merge gibi uzak veya daha riskli işlemler ilk aşamada kasıtlı olarak eklenmemiştir.
