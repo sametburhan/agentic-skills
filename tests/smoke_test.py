@@ -26,6 +26,62 @@ def test_powershell():
     require("[Çıkış Kodu: 0]" in result, result)
 
 
+def test_python_tools():
+    code_result = server.python_run_code(
+        "import sys; print('PYTHON_CODE_OK:' + sys.argv[1])",
+        args=["argument"],
+        timeout_seconds=20,
+    )
+    require(code_result.get("basarili") is True, str(code_result))
+    require("PYTHON_CODE_OK:argument" in code_result.get("stdout", ""), str(code_result))
+
+    with tempfile.TemporaryDirectory(prefix="mcp-python-test-") as directory:
+        script_path = Path(directory, "hello.py")
+        script_path.write_text("import sys\nprint('PYTHON_FILE_OK:' + sys.argv[1])\n", encoding="utf-8")
+        file_result = server.python_run_file(str(script_path), args=["argument"], timeout_seconds=20)
+        require(file_result.get("basarili") is True, str(file_result))
+        require("PYTHON_FILE_OK:argument" in file_result.get("stdout", ""), str(file_result))
+
+        venv_path = Path(directory, ".venv")
+        created = server.python_create_venv(str(venv_path), timeout_seconds=120)
+        require(created.get("basarili") is True, str(created))
+        require(Path(created.get("venv_python", "")).is_file(), str(created))
+
+        environment = server.python_environment_info(venv_path=str(venv_path))
+        require(environment.get("basarili") is True, str(environment))
+        require(environment.get("in_venv") is True, str(environment))
+
+        requirements_path = Path(directory, "requirements-empty.txt")
+        requirements_path.write_text("# intentionally empty\n", encoding="utf-8")
+        installed = server.python_install_requirements(
+            str(requirements_path), venv_path=str(venv_path), timeout_seconds=120,
+        )
+        require(installed.get("basarili") is True, str(installed))
+
+        rejected = server.python_install_packages(["--user"], venv_path=str(venv_path))
+        require(rejected.get("basarili") is False, str(rejected))
+
+
+def test_datetime_tools():
+    current = server.get_current_datetime("Europe/Istanbul")
+    require(current.get("basarili") is True, str(current))
+    require(current.get("utc_offset") == "+03:00", str(current))
+
+    converted = server.convert_datetime("2026-10-14T12:00:00Z", "Europe/Istanbul")
+    require(converted.get("basarili") is True, str(converted))
+    require(converted.get("datetime", "").startswith("2026-10-14T15:00:00"), str(converted))
+
+    calculated = server.calculate_datetime(
+        "2026-10-14T15:00:00+03:00", "Europe/Istanbul", days=1, hours=2,
+    )
+    require(calculated.get("datetime", "").startswith("2026-10-15T17:00:00"), str(calculated))
+
+    difference = server.datetime_difference(
+        "2026-10-14T12:00:00Z", "2026-10-16T00:00:00Z",
+    )
+    require(difference.get("total_hours") == 36, str(difference))
+
+
 def test_git():
     with tempfile.TemporaryDirectory(prefix="mcp-git-test-") as directory:
         def git(*args):
@@ -115,6 +171,10 @@ def test_websocket():
 if __name__ == "__main__":
     test_powershell()
     print("[OK] PowerShell")
+    test_python_tools()
+    print("[OK] Python")
+    test_datetime_tools()
+    print("[OK] DateTime")
     test_git()
     print("[OK] Git")
     test_web()

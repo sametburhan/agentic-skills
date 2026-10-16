@@ -17,6 +17,7 @@ import socket
 import sqlite3
 import subprocess
 import shutil
+import sys
 import tempfile
 import threading
 import urllib.request
@@ -24,7 +25,9 @@ import urllib.error
 import urllib.parse
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, List, Optional, Sequence
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import docx
 import pptx
@@ -110,6 +113,163 @@ def _format_process_result(result: Dict[str, Any], stdout_label: str = "Çıktı
     return "\n\n".join(chunks)
 
 
+def _resolve_python_executable(
+    python_path: Optional[str] = None,
+    venv_path: Optional[str] = None,
+    cwd: Optional[str] = None,
+) -> str:
+    """Resolve a system or virtual-environment Python executable without shell parsing."""
+    if python_path and venv_path:
+        raise ValueError("python_path ve venv_path aynı anda kullanılamaz.")
+
+    base_directory = os.path.abspath(cwd or os.getcwd())
+    if venv_path:
+        expanded_venv = os.path.expandvars(os.path.expanduser(venv_path.strip()))
+        absolute_venv = expanded_venv if os.path.isabs(expanded_venv) else os.path.join(base_directory, expanded_venv)
+        candidates = [
+            os.path.join(absolute_venv, "Scripts", "python.exe"),
+            os.path.join(absolute_venv, "bin", "python"),
+        ]
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+        raise FileNotFoundError(f"Sanal ortam Python yorumlayıcısı bulunamadı: {absolute_venv}")
+
+    if python_path:
+        cleaned = os.path.expandvars(os.path.expanduser(python_path.strip()))
+        if not cleaned:
+            raise ValueError("python_path boş olamaz.")
+        if os.path.isabs(cleaned) or os.path.dirname(cleaned):
+            candidate = cleaned if os.path.isabs(cleaned) else os.path.join(base_directory, cleaned)
+            if os.path.isfile(candidate):
+                return os.path.abspath(candidate)
+            raise FileNotFoundError(f"Python yorumlayıcısı bulunamadı: {candidate}")
+        resolved = shutil.which(cleaned)
+        if resolved:
+            return resolved
+        raise FileNotFoundError(f"Python komutu PATH üzerinde bulunamadı: {cleaned}")
+
+    return sys.executable
+
+
+def _python_process_response(
+    executable: str,
+    arguments: Sequence[str],
+    cwd: Optional[str],
+    timeout_seconds: int,
+) -> Dict[str, Any]:
+    """Run Python directly and return bounded, structured output."""
+    try:
+        environment = os.environ.copy()
+        environment.update({"PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"})
+        result = _run_process(
+            [executable, *[str(argument) for argument in arguments]],
+            cwd=cwd,
+            timeout_seconds=timeout_seconds,
+            env=environment,
+        )
+        output_limit = 100_000
+        stdout = result["stdout"]
+        stderr = result["stderr"]
+        stdout_truncated = len(stdout) > output_limit
+        stderr_truncated = len(stderr) > output_limit
+        return {
+            "basarili": result["returncode"] == 0,
+            "returncode": result["returncode"],
+            "python": executable,
+            "cwd": os.path.abspath(cwd or os.getcwd()),
+            "stdout": stdout[:output_limit],
+            "stderr": stderr[:output_limit],
+            "stdout_kirpildi": stdout_truncated,
+            "stderr_kirpildi": stderr_truncated,
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "basarili": False,
+            "python": executable,
+            "zaman_asimi": True,
+            "hata": f"Python işlemi {timeout_seconds} saniye içinde tamamlanamadı.",
+        }
+    except Exception as exc:
+        return {"basarili": False, "python": executable, "hata": str(exc)}
+
+
+def _clean_python_arguments(arguments: Optional[List[str]]) -> List[str]:
+    cleaned: List[str] = []
+    for argument in arguments or []:
+        value = str(argument)
+        if "\x00" in value:
+            raise ValueError("Python argümanları NUL karakteri içeremez.")
+        cleaned.append(value)
+    return cleaned
+
+
+def _clean_package_specs(packages: List[str]) -> List[str]:
+    cleaned: List[str] = []
+    for package in packages or []:
+        value = str(package).strip()
+        if not value:
+            continue
+        if value.startswith("-") or "\r" in value or "\n" in value or "\x00" in value:
+            raise ValueError(f"Geçersiz paket belirtimi: {value!r}")
+        cleaned.append(value)
+    if not cleaned:
+        raise ValueError("En az bir paket belirtilmelidir.")
+    if len(cleaned) > 100:
+        raise ValueError("Tek çağrıda en fazla 100 paket kurulabilir.")
+    return cleaned
+
+
+def _resolve_timezone(timezone_name: Optional[str]):
+    cleaned = (timezone_name or "local").strip()
+    if cleaned.lower() in {"local", "system", "yerel"}:
+        return datetime.now().astimezone().tzinfo, "local"
+    if cleaned.upper() in {"UTC", "Z"}:
+        return timezone.utc, "UTC"
+    try:
+        return ZoneInfo(cleaned), cleaned
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError(f"Saat dilimi bulunamadı: {cleaned}") from exc
+
+
+def _parse_datetime_value(value: str, default_timezone_name: Optional[str] = "local") -> datetime:
+    cleaned = (value or "").strip()
+    if not cleaned:
+        raise ValueError("Tarih/saat değeri boş olamaz.")
+    if cleaned.endswith("Z"):
+        cleaned = cleaned[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(cleaned)
+    except ValueError as exc:
+        raise ValueError("Tarih/saat ISO 8601 biçiminde olmalıdır; örnek: 2026-10-14T15:30:00+03:00") from exc
+    if parsed.tzinfo is None:
+        tzinfo, _ = _resolve_timezone(default_timezone_name)
+        parsed = parsed.replace(tzinfo=tzinfo)
+    return parsed
+
+
+def _datetime_payload(value: datetime, requested_timezone: str) -> Dict[str, Any]:
+    offset = value.utcoffset() or timedelta(0)
+    total_offset_seconds = int(offset.total_seconds())
+    sign = "+" if total_offset_seconds >= 0 else "-"
+    absolute_offset = abs(total_offset_seconds)
+    offset_text = f"{sign}{absolute_offset // 3600:02d}:{(absolute_offset % 3600) // 60:02d}"
+    iso_calendar = value.isocalendar()
+    return {
+        "datetime": value.isoformat(),
+        "date": value.date().isoformat(),
+        "time": value.timetz().isoformat(),
+        "timezone": requested_timezone,
+        "timezone_name": value.tzname(),
+        "utc_offset": offset_text,
+        "unix_timestamp": value.timestamp(),
+        "weekday": value.strftime("%A"),
+        "weekday_index": value.weekday(),
+        "iso_week": iso_calendar.week,
+        "iso_year": iso_calendar.year,
+    }
+
+
 # ==============================================================================
 # 1. BÖLÜM: SİSTEM, TERMİNAL VE LOCALHOST YÖNETİMİ
 # ==============================================================================
@@ -148,6 +308,303 @@ def run_powershell(command: str, cwd: Optional[str] = None, timeout_seconds: int
         return f"HATA: Komut {timeout_seconds} saniye içinde tamamlanamadı ve zaman aşımına uğradı."
     except Exception as e:
         return f"HATA: Komut çalıştırılırken bir istisna oluştu: {str(e)}"
+
+
+@mcp.tool()
+def python_run_code(
+    code: str,
+    args: Optional[List[str]] = None,
+    cwd: Optional[str] = None,
+    python_path: Optional[str] = None,
+    venv_path: Optional[str] = None,
+    timeout_seconds: int = 60,
+) -> Dict[str, Any]:
+    """Python kodunu sistem veya venv yorumlayıcısıyla doğrudan çalıştırır."""
+    try:
+        if not code or not code.strip():
+            return {"basarili": False, "hata": "Python kodu boş olamaz."}
+        if len(code) > 500_000:
+            return {"basarili": False, "hata": "Python kodu 500.000 karakter sınırını aşıyor."}
+        executable = _resolve_python_executable(python_path, venv_path, cwd)
+        return _python_process_response(
+            executable,
+            ["-c", code, *_clean_python_arguments(args)],
+            cwd,
+            max(1, min(int(timeout_seconds), 900)),
+        )
+    except Exception as exc:
+        return {"basarili": False, "hata": f"Python kodu çalıştırılamadı: {exc}"}
+
+
+@mcp.tool()
+def python_run_file(
+    file_path: str,
+    args: Optional[List[str]] = None,
+    cwd: Optional[str] = None,
+    python_path: Optional[str] = None,
+    venv_path: Optional[str] = None,
+    timeout_seconds: int = 60,
+) -> Dict[str, Any]:
+    """Bir Python dosyasını argümanlarıyla sistem veya venv yorumlayıcısında çalıştırır."""
+    try:
+        base_directory = os.path.abspath(cwd or os.getcwd())
+        expanded_file = os.path.expandvars(os.path.expanduser((file_path or "").strip()))
+        absolute_file = expanded_file if os.path.isabs(expanded_file) else os.path.join(base_directory, expanded_file)
+        absolute_file = os.path.abspath(absolute_file)
+        if not os.path.isfile(absolute_file):
+            return {"basarili": False, "hata": f"Python dosyası bulunamadı: {absolute_file}"}
+        working_directory = os.path.abspath(cwd) if cwd else os.path.dirname(absolute_file)
+        executable = _resolve_python_executable(python_path, venv_path, working_directory)
+        return _python_process_response(
+            executable,
+            [absolute_file, *_clean_python_arguments(args)],
+            working_directory,
+            max(1, min(int(timeout_seconds), 900)),
+        )
+    except Exception as exc:
+        return {"basarili": False, "hata": f"Python dosyası çalıştırılamadı: {exc}"}
+
+
+@mcp.tool()
+def python_create_venv(
+    venv_path: str,
+    cwd: Optional[str] = None,
+    python_path: Optional[str] = None,
+    system_site_packages: bool = False,
+    upgrade_deps: bool = False,
+    timeout_seconds: int = 300,
+) -> Dict[str, Any]:
+    """Belirtilen dizinde yeni bir Python sanal ortamı oluşturur."""
+    try:
+        base_directory = os.path.abspath(cwd or os.getcwd())
+        expanded_venv = os.path.expandvars(os.path.expanduser((venv_path or "").strip()))
+        if not expanded_venv:
+            return {"basarili": False, "hata": "venv_path boş olamaz."}
+        absolute_venv = expanded_venv if os.path.isabs(expanded_venv) else os.path.join(base_directory, expanded_venv)
+        absolute_venv = os.path.abspath(absolute_venv)
+        if os.path.isdir(absolute_venv) and os.listdir(absolute_venv):
+            return {"basarili": False, "hata": f"Hedef sanal ortam dizini boş değil: {absolute_venv}"}
+        os.makedirs(os.path.dirname(absolute_venv), exist_ok=True)
+        executable = _resolve_python_executable(python_path, None, base_directory)
+        command = ["-m", "venv"]
+        if system_site_packages:
+            command.append("--system-site-packages")
+        if upgrade_deps:
+            command.append("--upgrade-deps")
+        command.append(absolute_venv)
+        response = _python_process_response(
+            executable,
+            command,
+            base_directory,
+            max(30, min(int(timeout_seconds), 900)),
+        )
+        response["venv_path"] = absolute_venv
+        if response.get("basarili"):
+            response["venv_python"] = _resolve_python_executable(None, absolute_venv, base_directory)
+        return response
+    except Exception as exc:
+        return {"basarili": False, "hata": f"Sanal ortam oluşturulamadı: {exc}"}
+
+
+@mcp.tool()
+def python_install_packages(
+    packages: List[str],
+    cwd: Optional[str] = None,
+    python_path: Optional[str] = None,
+    venv_path: Optional[str] = None,
+    upgrade: bool = False,
+    timeout_seconds: int = 600,
+) -> Dict[str, Any]:
+    """Doğrulanmış paket belirtimlerini pip ile sistem veya venv ortamına kurar."""
+    try:
+        clean_packages = _clean_package_specs(packages)
+        executable = _resolve_python_executable(python_path, venv_path, cwd)
+        command = ["-m", "pip", "install", "--disable-pip-version-check", "--no-input"]
+        if upgrade:
+            command.append("--upgrade")
+        command.extend(clean_packages)
+        response = _python_process_response(
+            executable,
+            command,
+            cwd,
+            max(30, min(int(timeout_seconds), 900)),
+        )
+        response["paketler"] = clean_packages
+        return response
+    except Exception as exc:
+        return {"basarili": False, "hata": f"Python paketleri kurulamadı: {exc}"}
+
+
+@mcp.tool()
+def python_install_requirements(
+    requirements_path: str,
+    cwd: Optional[str] = None,
+    python_path: Optional[str] = None,
+    venv_path: Optional[str] = None,
+    upgrade: bool = False,
+    timeout_seconds: int = 600,
+) -> Dict[str, Any]:
+    """Bir requirements dosyasını pip ile sistem veya venv ortamına kurar."""
+    try:
+        base_directory = os.path.abspath(cwd or os.getcwd())
+        expanded = os.path.expandvars(os.path.expanduser((requirements_path or "").strip()))
+        absolute_requirements = expanded if os.path.isabs(expanded) else os.path.join(base_directory, expanded)
+        absolute_requirements = os.path.abspath(absolute_requirements)
+        if not os.path.isfile(absolute_requirements):
+            return {"basarili": False, "hata": f"Requirements dosyası bulunamadı: {absolute_requirements}"}
+        executable = _resolve_python_executable(python_path, venv_path, base_directory)
+        command = [
+            "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
+            "-r", absolute_requirements,
+        ]
+        if upgrade:
+            command.insert(5, "--upgrade")
+        response = _python_process_response(
+            executable,
+            command,
+            base_directory,
+            max(30, min(int(timeout_seconds), 900)),
+        )
+        response["requirements_path"] = absolute_requirements
+        return response
+    except Exception as exc:
+        return {"basarili": False, "hata": f"Requirements kurulamadı: {exc}"}
+
+
+@mcp.tool()
+def python_environment_info(
+    cwd: Optional[str] = None,
+    python_path: Optional[str] = None,
+    venv_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Seçilen Python yorumlayıcısının sürüm, platform, venv ve pip bilgilerini döndürür."""
+    try:
+        executable = _resolve_python_executable(python_path, venv_path, cwd)
+        inspection_code = (
+            "import json,platform,sys;"
+            "print(json.dumps({'executable':sys.executable,'version':platform.python_version(),"
+            "'implementation':platform.python_implementation(),'platform':platform.platform(),"
+            "'prefix':sys.prefix,'base_prefix':sys.base_prefix,'in_venv':sys.prefix!=sys.base_prefix},"
+            "ensure_ascii=False))"
+        )
+        response = _python_process_response(executable, ["-c", inspection_code], cwd, 30)
+        if not response.get("basarili"):
+            return response
+        info = json.loads(response.get("stdout") or "{}")
+        pip_response = _python_process_response(executable, ["-m", "pip", "--version"], cwd, 30)
+        info.update({
+            "basarili": True,
+            "pip": pip_response.get("stdout") if pip_response.get("basarili") else None,
+            "pip_hatasi": (
+                pip_response.get("stderr") or pip_response.get("hata")
+                if not pip_response.get("basarili")
+                else None
+            ),
+        })
+        return info
+    except Exception as exc:
+        return {"basarili": False, "hata": f"Python ortam bilgisi alınamadı: {exc}"}
+
+
+@mcp.tool()
+def get_current_datetime(timezone_name: str = "local") -> Dict[str, Any]:
+    """Belirtilen saat dilimindeki güncel tarih, saat, UTC karşılığı ve Unix zamanını döndürür."""
+    try:
+        tzinfo, timezone_label = _resolve_timezone(timezone_name)
+        current = datetime.now(tzinfo)
+        result = {"basarili": True, **_datetime_payload(current, timezone_label)}
+        result["utc_datetime"] = current.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        return result
+    except Exception as exc:
+        return {"basarili": False, "hata": f"Güncel tarih/saat alınamadı: {exc}"}
+
+
+@mcp.tool()
+def convert_datetime(
+    datetime_value: str,
+    target_timezone: str,
+    source_timezone: str = "local",
+) -> Dict[str, Any]:
+    """ISO 8601 tarih/saat değerini hedef saat dilimine dönüştürür."""
+    try:
+        source = _parse_datetime_value(datetime_value, source_timezone)
+        target_tz, target_label = _resolve_timezone(target_timezone)
+        converted = source.astimezone(target_tz)
+        return {
+            "basarili": True,
+            "source_datetime": source.isoformat(),
+            **_datetime_payload(converted, target_label),
+        }
+    except Exception as exc:
+        return {"basarili": False, "hata": f"Tarih/saat dönüştürülemedi: {exc}"}
+
+
+@mcp.tool()
+def calculate_datetime(
+    datetime_value: Optional[str] = None,
+    timezone_name: str = "local",
+    days: float = 0,
+    hours: float = 0,
+    minutes: float = 0,
+    seconds: float = 0,
+) -> Dict[str, Any]:
+    """Bir tarihe gün, saat, dakika ve saniye ekler; negatif değerlerle çıkarma yapar."""
+    try:
+        tzinfo, timezone_label = _resolve_timezone(timezone_name)
+        starting = (
+            _parse_datetime_value(datetime_value, timezone_name).astimezone(tzinfo)
+            if datetime_value
+            else datetime.now(tzinfo)
+        )
+        delta = timedelta(days=float(days), hours=float(hours), minutes=float(minutes), seconds=float(seconds))
+        calculated = starting + delta
+        return {
+            "basarili": True,
+            "source_datetime": starting.isoformat(),
+            "delta_seconds": delta.total_seconds(),
+            **_datetime_payload(calculated, timezone_label),
+        }
+    except Exception as exc:
+        return {"basarili": False, "hata": f"Tarih hesabı yapılamadı: {exc}"}
+
+
+@mcp.tool()
+def datetime_difference(
+    start_datetime: str,
+    end_datetime: str,
+    timezone_name: str = "local",
+    absolute: bool = False,
+) -> Dict[str, Any]:
+    """İki ISO 8601 tarih/saat arasındaki imzalı veya mutlak süre farkını hesaplar."""
+    try:
+        start = _parse_datetime_value(start_datetime, timezone_name)
+        end = _parse_datetime_value(end_datetime, timezone_name)
+        signed_seconds = (end - start).total_seconds()
+        result_seconds = abs(signed_seconds) if absolute else signed_seconds
+        human_seconds = abs(result_seconds)
+        whole_seconds = int(human_seconds)
+        days_part, remainder = divmod(whole_seconds, 86_400)
+        hours_part, remainder = divmod(remainder, 3_600)
+        minutes_part, seconds_part = divmod(remainder, 60)
+        return {
+            "basarili": True,
+            "start_datetime": start.isoformat(),
+            "end_datetime": end.isoformat(),
+            "absolute": bool(absolute),
+            "total_seconds": result_seconds,
+            "total_minutes": result_seconds / 60,
+            "total_hours": result_seconds / 3_600,
+            "total_days": result_seconds / 86_400,
+            "sign": 0 if result_seconds == 0 else (1 if result_seconds > 0 else -1),
+            "components": {
+                "days": days_part,
+                "hours": hours_part,
+                "minutes": minutes_part,
+                "seconds": seconds_part,
+            },
+        }
+    except Exception as exc:
+        return {"basarili": False, "hata": f"Tarih farkı hesaplanamadı: {exc}"}
 
 
 @mcp.tool()

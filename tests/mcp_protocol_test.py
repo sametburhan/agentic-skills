@@ -25,7 +25,12 @@ async def list_tool_names(script: Path):
 
 async def main():
     expected = {
-        ROOT / "tools" / "system_tools" / "server.py": {"run_powershell", "get_system_environment_info"},
+        ROOT / "tools" / "system_tools" / "server.py": {
+            "run_powershell", "get_system_environment_info", "python_run_code", "python_run_file",
+            "python_create_venv", "python_install_packages", "python_install_requirements",
+            "python_environment_info", "get_current_datetime", "convert_datetime",
+            "calculate_datetime", "datetime_difference",
+        },
         ROOT / "tools" / "git_tools" / "server.py": {"git_status", "git_diff", "git_log", "git_add"},
         ROOT / "tools" / "web_tools" / "search_server.py": {
             "web_search", "fetch_web_page_text", "observe_web_page", "research_web",

@@ -81,7 +81,7 @@ Yerel 7B, 8B veya 14B modellerin bellek taşmasını önlemek için LM Studio ay
 - `git` (Versiyon kontrolü)
 
 ### Profil B: Backend & API Geliştirme
-- `core-codebase` + `core-system`
+- `core-codebase` + `core-system` (`python_*` araçları, güncel zaman, saat dilimi dönüşümü ve tarih hesapları)
 - `api-client` (FastAPI / Express endpoint testleri)
 - `web-search` (`websocket_*` araçlarıyla `ws://` ve `wss://` servis testi)
 - `sqlite-database` (Veritabanı tabloları ve SQL sorguları)
@@ -118,10 +118,15 @@ Betik kendi proje dizinine otomatik geçer, MCP yapılandırmasındaki `python` 
 > `all-in-one-suite` kullanıyorsanız aynı modüler sunucuları ayrıca açmayın; araç isimleri yinelenir.
 > Yapılandırma değişikliğinden sonra MCP istemcisini yeniden başlatın.
 
+### 3. Adım: Ajan Davranışını Etkinleştirin
+
+[SYSTEM_PROMPT.md](file:///c:/Users/samet/Desktop/agentic-skills/SYSTEM_PROMPT.md) dosyasındaki `text` bloğunu LM Studio'nun **System Prompt** alanına yapıştırın. Bu prompt kısa cümlelerden niyet çıkarma, güncel konularda tarih ve web araçlarını kendiliğinden kullanma, yetersiz araştırmayı genişletme ve kısa cevap verme kurallarını içerir.
+
 ---
 
 ## 📖 Ayrıntılı Kılavuzlar
 
+- [LM Studio Sistem Prompt'u](file:///c:/Users/samet/Desktop/agentic-skills/SYSTEM_PROMPT.md)
 - [Ofis Belgeleri (DOCX & PPTX) Kılavuzu](file:///c:/Users/samet/Desktop/agentic-skills/tools/office_tools/README.md)
 - [Kod Tabanı & Dosya Yönetimi Kılavuzu](file:///c:/Users/samet/Desktop/agentic-skills/tools/codebase_tools/README.md)
 - [Sistem, PowerShell & WSL Kılavuzu](file:///c:/Users/samet/Desktop/agentic-skills/tools/system_tools/README.md)
